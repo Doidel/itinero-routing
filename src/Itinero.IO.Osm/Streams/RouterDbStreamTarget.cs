@@ -421,7 +421,10 @@ namespace Itinero.IO.Osm.Streams
                             metaTags.Add(tag);
                         }
                     }
-                    
+
+                    if (KeepWayIds && way.Id.HasValue) metaTags.Add(new OsmSharp.Tags.Tag("wayId", way.Id.ToString()));
+                    //if (KeepNodeIds && way.Nodes != null) metaTags.Add(new OsmSharp.Tags.Tag("nodeIds", string.Join(",", way.Nodes)));
+
                     if (!_vehicleCache.AnyCanTraverse(profileTags))
                     { // way has some use, add all of it's nodes to the index.
                         return;

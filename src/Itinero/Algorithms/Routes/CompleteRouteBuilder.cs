@@ -266,6 +266,14 @@ namespace Itinero.Algorithms.Routes
             }
             var meta = _routerDb.EdgeMeta.Get(edge.Data.MetaId);
             var attributes = new AttributeCollection(meta);
+            if (meta.TryGetValue("wayId", out string wayId))
+            {
+                attributes.AddOrReplace("wayId", wayId);
+            }
+            if (meta.TryGetValue("nodeId", out string nodeId))
+            {
+                attributes.AddOrReplace("nodeId", nodeId);
+            }
             if (!profile.IsTranslatedProfile()) attributes.AddOrReplace(profile);
             attributes.AddOrReplace("profile", _profile.FullName);
             
