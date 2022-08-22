@@ -21,8 +21,10 @@ using Itinero.Data.Contracted;
 using Itinero.Graphs.Directed;
 using Itinero.Profiles;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace Itinero.Algorithms.Contracted.EdgeBased
 {
@@ -36,11 +38,11 @@ namespace Itinero.Algorithms.Contracted.EdgeBased
         private readonly DirectedDynamicGraph _graph;
         private readonly RouterPoint[] _sources;
         private readonly RouterPoint[] _targets;
-        private readonly Dictionary<uint, Dictionary<int, T>> _buckets;
+        private readonly ConcurrentDictionary<uint, Dictionary<int, T>> _buckets;
         private readonly WeightHandler<T> _weightHandler;
         private readonly Profile _profile;
         private readonly T _max;
-        
+
         /// <summary>
         /// Creates a new algorithm.
         /// </summary>
@@ -67,8 +69,9 @@ namespace Itinero.Algorithms.Contracted.EdgeBased
             }
             _graph = contractedDb.EdgeBasedGraph;
             weightHandler.CheckCanUse(contractedDb);
-            
-            _buckets = new Dictionary<uint, Dictionary<int, T>>();
+
+            _buckets = new ConcurrentDictionary<uint, Dictionary<int, T>>();
+            //_buckets = new Dictionary<uint, Dictionary<int, T>>();
         }
 
         private T[][] _weights;
@@ -89,7 +92,7 @@ namespace Itinero.Algorithms.Contracted.EdgeBased
                     var target = _targets[j];
                     _weights[i][j] = _weightHandler.Infinite;
 
-                    if(target.EdgeId == source.EdgeId)
+                    if (target.EdgeId == source.EdgeId)
                     {
                         var path = source.EdgePathTo(_routerDb, _weightHandler, target);
                         if (path != null)
@@ -100,19 +103,25 @@ namespace Itinero.Algorithms.Contracted.EdgeBased
                 }
             }
 
+            var parallelOptions = new ParallelOptions()
+            {
+                CancellationToken = cancellationToken,
+                MaxDegreeOfParallelism = Environment.ProcessorCount - 1
+            };
+
             // do forward searches into buckets.
-            for(var i = 0; i < _sources.Length; i++)
+            Parallel.For(0, _sources.Length, parallelOptions, i =>
             {
                 var forward = new Dykstra<T>(_graph, _weightHandler, _sources[i].ToEdgePaths(_routerDb, _weightHandler, true), _routerDb.GetGetRestrictions(_profile, null), false, _max);
                 forward.WasFound += (path) =>
-                    {
-                        return this.ForwardVertexFound(i, path.Vertex, path.Weight);
-                    };
+                {
+                    return this.ForwardVertexFound(i, path.Vertex, path.Weight);
+                };
                 forward.Run(cancellationToken);
-            }
+            });
 
             // do backward searches into buckets.
-            for (var i = 0; i < _targets.Length; i++)
+            Parallel.For(0, _targets.Length, parallelOptions, i =>
             {
                 var backward = new Dykstra<T>(_graph, _weightHandler, _targets[i].ToEdgePaths(_routerDb, _weightHandler, false), _routerDb.GetGetRestrictions(_profile, null), true, _max);
                 backward.WasFound += (path) =>
@@ -120,7 +129,7 @@ namespace Itinero.Algorithms.Contracted.EdgeBased
                         return this.BackwardVertexFound(i, path.Vertex, path.Weight);
                     };
                 backward.Run(cancellationToken);
-            }
+            });
             this.HasSucceeded = true;
         }
 
@@ -141,28 +150,25 @@ namespace Itinero.Algorithms.Contracted.EdgeBased
         /// <returns></returns>
         private bool ForwardVertexFound(int i, uint vertex, T weight)
         {
-            Dictionary<int, T> bucket;
-            if(!_buckets.TryGetValue(vertex, out bucket))
-            {
-                bucket = new Dictionary<int, T>();
-                _buckets.Add(vertex, bucket);
-                bucket[i] = weight;
-            }
-            else
-            {
-                T existing;
-                if (bucket.TryGetValue(i, out existing))
+            _buckets.AddOrUpdate(vertex, (k) => new Dictionary<int, T>() { { i, weight } },
+                (k, existingBucket) =>
                 {
-                    if(_weightHandler.IsSmallerThan(weight, existing))
+
+                    T existing;
+                    if (existingBucket.TryGetValue(i, out existing))
                     {
-                        bucket[i] = weight;
+                        if (_weightHandler.IsSmallerThan(weight, existing))
+                        {
+                            existingBucket[i] = weight;
+                        }
                     }
-                }
-                else
-                {
-                    bucket[i] = weight;
-                }
-            }
+                    else
+                    {
+                        existingBucket[i] = weight;
+                    }
+                    return existingBucket;
+
+                });
             return false;
         }
 
@@ -173,9 +179,9 @@ namespace Itinero.Algorithms.Contracted.EdgeBased
         private bool BackwardVertexFound(int i, uint vertex, T weight)
         {
             Dictionary<int, T> bucket;
-            if(_buckets.TryGetValue(vertex, out bucket))
+            if (_buckets.TryGetValue(vertex, out bucket))
             {
-                foreach(var pair in bucket)
+                foreach (var pair in bucket)
                 {
                     var existing = _weights[pair.Key][i];
                     var totalWeight = _weightHandler.Add(weight, pair.Value);

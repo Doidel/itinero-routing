@@ -24,6 +24,8 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using Itinero.Algorithms.Contracted.Dual.Cache;
+using System.Collections.Concurrent;
+using System.Threading.Tasks;
 
 namespace Itinero.Algorithms.Contracted.Dual.ManyToMany
 {
@@ -54,8 +56,8 @@ namespace Itinero.Algorithms.Contracted.Dual.ManyToMany
             _cache = cache;
         }
 
-        protected Dictionary<uint, Dictionary<int, T>> _buckets;
-        protected T[][] _weights;
+        protected ConcurrentDictionary<uint, ConcurrentDictionary<int, T>> _buckets;
+        protected volatile T[][] _weights;
 
         /// <summary>
         /// Executes the actual run.
@@ -74,23 +76,29 @@ namespace Itinero.Algorithms.Contracted.Dual.ManyToMany
                 }
             }
 
-            _buckets = new Dictionary<uint, Dictionary<int, T>>();
+            _buckets = new ConcurrentDictionary<uint, ConcurrentDictionary<int, T>>();
+
+            var parallelOptions = new ParallelOptions()
+            {
+                CancellationToken = cancellationToken,
+                MaxDegreeOfParallelism = Environment.ProcessorCount - 1
+            };
 
             // do forward searches into buckets.
-            for (var i = 0; i < _sources.Length; i++)
+            Parallel.For(0, _sources.Length, parallelOptions, i =>
             {
                 var forward = new Dykstra<T>(_graph, _weightHandler, _sources[i], false, _max, _cache);
                 forward.WasFound += (p, v, w) => this.ForwardVertexFound(i, v, w);
                 forward.Run(cancellationToken);
-            }
+            });
 
             // do backward searches into buckets.
-            for (var i = 0; i < _targets.Length; i++)
+            Parallel.For(0, _targets.Length, parallelOptions, i =>
             {
                 var backward = new Dykstra<T>(_graph, _weightHandler, _targets[i], true, _max, _cache);
                 backward.WasFound += (p, v, w) => this.BackwardVertexFound(i, v, w);
                 backward.Run(cancellationToken);
-            }
+            });
             
             // invert matrix.
             // TODO: this can be done inplace when matrix is square: https://mouzamali.wordpress.com/2013/06/08/inplace-transpose-a-square-array/
@@ -120,26 +128,27 @@ namespace Itinero.Algorithms.Contracted.Dual.ManyToMany
         /// <returns></returns>
         private bool ForwardVertexFound(int i, uint vertex, T weight)
         {
-            if (!_buckets.TryGetValue(vertex, out var bucket))
+            _buckets.AddOrUpdate(vertex, (k) => 
             {
-                bucket = new Dictionary<int, T>();
-                _buckets.Add(vertex, bucket);
-                bucket[i] = weight;
-            }
-            else
-            {
-                if (bucket.TryGetValue(i, out var existing))
+                var dict = new ConcurrentDictionary<int, T>();
+                dict[i] = weight;
+                return dict;
+            },
+                (k, existingBucket) =>
                 {
-                    if (_weightHandler.IsSmallerThan(weight, existing))
+                    if (existingBucket.TryGetValue(i, out var existing))
                     {
-                        bucket[i] = weight;
+                        if (_weightHandler.IsSmallerThan(weight, existing))
+                        {
+                            existingBucket[i] = weight;
+                        }
                     }
-                }
-                else
-                {
-                    bucket[i] = weight;
-                }
-            }
+                    else
+                    {
+                        existingBucket[i] = weight;
+                    }
+                    return existingBucket;
+                });
             return false;
         }
 
@@ -150,15 +159,18 @@ namespace Itinero.Algorithms.Contracted.Dual.ManyToMany
         private bool BackwardVertexFound(int i, uint vertex, T weight)
         {
             if (!_buckets.TryGetValue(vertex, out var bucket)) return false;
-            
-            var weights = _weights[i];
-            foreach (var pair in bucket)
+
+            lock (_weights)
             {
-                var existing = weights[pair.Key];
-                var total = _weightHandler.Add(weight, pair.Value);
-                if (_weightHandler.IsSmallerThan(total, existing))
+                var weights = _weights[i];
+                foreach (var pair in bucket)
                 {
-                    weights[pair.Key] = total;
+                    var existing = weights[pair.Key];
+                    var total = _weightHandler.Add(weight, pair.Value);
+                    if (_weightHandler.IsSmallerThan(total, existing))
+                    {
+                        weights[pair.Key] = total;
+                    }
                 }
             }
             return false;
@@ -180,8 +192,8 @@ namespace Itinero.Algorithms.Contracted.Dual.ManyToMany
             
         }
 
-        private Dictionary<uint, Dictionary<int, float>> _buckets;
-        private float[][] _weights;
+        private ConcurrentDictionary<uint, ConcurrentDictionary<int, float>> _buckets;
+        private volatile float[][] _weights;
 
         /// <summary>
         /// Executes the actual run.
@@ -200,22 +212,29 @@ namespace Itinero.Algorithms.Contracted.Dual.ManyToMany
                 }
             }
 
-            _buckets = new Dictionary<uint, Dictionary<int, float>>();
+            _buckets = new ConcurrentDictionary<uint, ConcurrentDictionary<int, float>>();
+
+            var parallelOptions = new ParallelOptions()
+            {
+                CancellationToken = cancellationToken,
+                MaxDegreeOfParallelism = Environment.ProcessorCount - 1
+            };
+
             // do forward searches into buckets.
-            for (var i = 0; i < _sources.Length; i++)
+            Parallel.For(0, _sources.Length, parallelOptions, i =>
             {
                 var forward = new Dykstra<float>(_graph, _weightHandler, _sources[i], false, _max, _cache);
                 forward.WasFound += (p, v, w) => this.ForwardVertexFound(i, v, w);
                 forward.Run(cancellationToken);
-            }
+            });
 
             // do backward searches into buckets.
-            for (var i = 0; i < _targets.Length; i++)
+            Parallel.For(0, _targets.Length, parallelOptions, i =>
             {
                 var backward = new Dykstra<float>(_graph, _weightHandler, _targets[i], true, _max, _cache);
                 backward.WasFound += (p, v, w) => this.BackwardVertexFound(i, v, w);
                 backward.Run(cancellationToken);
-            }
+            });
             
             // invert matrix.
             // TODO: this can be done inplace when matrix is square: https://mouzamali.wordpress.com/2013/06/08/inplace-transpose-a-square-array/
@@ -245,26 +264,27 @@ namespace Itinero.Algorithms.Contracted.Dual.ManyToMany
         /// <returns></returns>
         private bool ForwardVertexFound(int i, uint vertex, float weight)
         {
-            if (!_buckets.TryGetValue(vertex, out var bucket))
+            _buckets.AddOrUpdate(vertex, (k) => 
             {
-                bucket = new Dictionary<int, float>();
-                _buckets.Add(vertex, bucket);
-                bucket[i] = weight;
-            }
-            else
-            {
-                if (bucket.TryGetValue(i, out var existing))
+                var dict = new ConcurrentDictionary<int, float>();
+                dict[i] = weight;
+                return dict;
+            },
+                (k, existingBucket) =>
                 {
-                    if (_weightHandler.IsSmallerThan(weight, existing))
+                    if (existingBucket.TryGetValue(i, out var existing))
                     {
-                        bucket[i] = weight;
+                        if (_weightHandler.IsSmallerThan(weight, existing))
+                        {
+                            existingBucket[i] = weight;
+                        }
                     }
-                }
-                else
-                {
-                    bucket[i] = weight;
-                }
-            }
+                    else
+                    {
+                        existingBucket[i] = weight;
+                    }
+                    return existingBucket;
+                });
             return false;
         }
 
@@ -275,15 +295,18 @@ namespace Itinero.Algorithms.Contracted.Dual.ManyToMany
         private bool BackwardVertexFound(int i, uint vertex, float weight)
         {
             if (!_buckets.TryGetValue(vertex, out var bucket)) return false;
-            
-            var weights = _weights[i];
-            foreach (var pair in bucket)
+
+            lock (_weights)
             {
-                var existing = weights[pair.Key];
-                var total = weight + pair.Value;
-                if (total < existing)
+                var weights = _weights[i];
+                foreach (var pair in bucket)
                 {
-                    weights[pair.Key] = total;
+                    var existing = weights[pair.Key];
+                    var total = weight + pair.Value;
+                    if (total < existing)
+                    {
+                        weights[pair.Key] = total;
+                    }
                 }
             }
             return false;
